@@ -66,7 +66,14 @@ CAPTION = {
 URGENCY = {
     "no urgency": 0,
     "urgent (sfw)": 250,
-    "urgent (nsfw)": 500,
+    "urgent (nsfw)": 455,
+}
+
+# hardcoded to avoid rounding issues
+URGENCY_STARS = {
+    "no urgency": 0,
+    "urgent (sfw)": 19230,   # 250 × 76.92
+    "urgent (nsfw)": 35000,  # exact
 }
 
 STEPS = ["format", "level", "exclusivity", "personalization", "interactivity", "caption", "urgency"]
@@ -86,10 +93,11 @@ STEP_TITLES = {
     "personalization": "select personalization",
     "interactivity": "select interactivity",
     "caption": "add caption?",
-    "urgency": "add urgency?",
+    "urgency": "add urgency? (billed separately)",
 }
 
-USD_TO_STARS = 45.5
+# 1 star = $0.013 usd → 1 usd = 76.92 stars
+USD_TO_STARS = 76.92
 
 DISCLAIMER = (
     "\n\n⚠️ *all sales are final.*\n"
@@ -97,7 +105,8 @@ DISCLAIMER = (
     "requester will be contacted shortly via telegram."
 )
 
-def calculate_price(selections: dict) -> tuple[float, int]:
+def calculate_price(selections: dict) -> tuple[float, int, float]:
+    """returns (base_usd, stars, urgency_usd)"""
     base = FORMATS[selections["format"]]
     multiplier = (
         LEVELS[selections["level"]]
@@ -106,17 +115,17 @@ def calculate_price(selections: dict) -> tuple[float, int]:
         * INTERACTIVITY[selections["interactivity"]]
         * CAPTION[selections["caption"]]
     )
-    urgency_fee = URGENCY[selections["urgency"]]
-    usd = round(base * multiplier + urgency_fee, 2)
-    stars = max(1, round(usd * USD_TO_STARS))
-    return usd, stars
+    base_usd = round(base * multiplier, 2)
+    urgency_usd = URGENCY[selections["urgency"]]
+    stars = max(1, round(base_usd * USD_TO_STARS))
+    return base_usd, stars, urgency_usd
 
 def build_keyboard(step: str, prefix: str) -> InlineKeyboardMarkup:
     data = STEP_DATA[step]
     buttons = [[InlineKeyboardButton(label, callback_data=f"{prefix}|{step}|{label}")] for label in data]
     return InlineKeyboardMarkup(buttons)
 
-def build_summary(selections: dict, usd: float, stars: int, note: str = "") -> str:
+def build_summary(selections: dict, base_usd: float, stars: int, urgency_usd: float, note: str = "") -> str:
     lines = [
         "━━━━━━━━━━━━━━━━━━━━",
         "📋 *order summary*",
@@ -127,14 +136,15 @@ def build_summary(selections: dict, usd: float, stars: int, note: str = "") -> s
     if note:
         lines.append(f"• *note:* {note}")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💵 *price:* ${usd:,.2f} usd")
-    lines.append(f"⭐ *stars:* {stars:,}")
+    lines.append(f"⭐ *stars:* {stars:,}  (~${base_usd:,.2f} usd)")
+    if urgency_usd > 0:
+        lines.append(f"⚡ *urgency add-on:* ${urgency_usd:,.2f} usd _(billed separately)_")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
 
 # ── airtable ──────────────────────────────────────────────────────────────────
-async def save_to_airtable(user_id: int, username: str, selections: dict, usd: float, stars: int, note: str = "", status: str = "pending"):
+async def save_to_airtable(user_id: int, username: str, selections: dict, base_usd: float, stars: int, urgency_usd: float, note: str = "", status: str = "pending"):
     headers = {
         "Authorization": f"Bearer {AIRTABLE_API_KEY}",
         "Content-Type": "application/json",
@@ -151,7 +161,8 @@ async def save_to_airtable(user_id: int, username: str, selections: dict, usd: f
             "caption": selections.get("caption", ""),
             "urgency": selections.get("urgency", ""),
             "note": note,
-            "usd_price": usd,
+            "usd_price": base_usd,
+            "urgency_usd": urgency_usd,
             "stars": stars,
             "status": status,
             "created_at": datetime.utcnow().strftime("%Y-%m-%d"),
@@ -243,15 +254,16 @@ async def handle_skip_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, note: str = ""):
     selections = context.user_data.get("selections", {})
-    usd, stars = calculate_price(selections)
-    summary = build_summary(selections, usd, stars, note)
+    base_usd, stars, urgency_usd = calculate_price(selections)
+    summary = build_summary(selections, base_usd, stars, urgency_usd, note)
 
     record_id = await save_to_airtable(
         user_id=update.effective_user.id,
         username=update.effective_user.username or update.effective_user.first_name,
         selections=selections,
-        usd=usd,
+        base_usd=base_usd,
         stars=stars,
+        urgency_usd=urgency_usd,
         note=note,
         status="pending"
     )
@@ -270,15 +282,16 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, note:
 
 async def show_summary_from_query(query, context: ContextTypes.DEFAULT_TYPE, note: str = ""):
     selections = context.user_data.get("selections", {})
-    usd, stars = calculate_price(selections)
-    summary = build_summary(selections, usd, stars, note)
+    base_usd, stars, urgency_usd = calculate_price(selections)
+    summary = build_summary(selections, base_usd, stars, urgency_usd, note)
 
     record_id = await save_to_airtable(
         user_id=query.from_user.id,
         username=query.from_user.username or query.from_user.first_name,
         selections=selections,
-        usd=usd,
+        base_usd=base_usd,
         stars=stars,
+        urgency_usd=urgency_usd,
         note=note,
         status="pending"
     )
@@ -316,6 +329,7 @@ async def handle_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("pay|"):
         stars = int(query.data.split("|")[1])
         selections = context.user_data.get("selections", {})
+        urgency = selections.get("urgency", "no urgency")
 
         await context.bot.send_invoice(
             chat_id=query.message.chat_id,
@@ -336,7 +350,22 @@ async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stars = update.message.successful_payment.total_amount
     record_id = context.user_data.get("airtable_record_id")
+    selections = context.user_data.get("selections", {})
+    urgency = selections.get("urgency", "no urgency")
+    urgency_usd = URGENCY.get(urgency, 0)
 
+    # check if this is the urgency payment (2nd step)
+    if context.user_data.get("urgency_payment"):
+        await update.message.reply_text(
+            "⚡ *urgency payment received.*\n\n"
+            f"⭐ {stars:,} stars — your request has been prioritized.\n"
+            "you will be contacted shortly via telegram.",
+            parse_mode="Markdown"
+        )
+        context.user_data.clear()
+        return
+
+    # first payment done
     if record_id:
         await update_airtable_status(record_id, "paid")
 
@@ -346,7 +375,28 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "you will be contacted shortly via telegram.",
         parse_mode="Markdown"
     )
-    context.user_data.clear()
+
+    # send urgency invoice as 2nd step if selected
+    if urgency_usd > 0:
+        urgency_stars = URGENCY_STARS.get(urgency, max(1, round(urgency_usd * USD_TO_STARS)))
+        context.user_data["urgency_payment"] = True
+        await update.message.reply_text(
+            f"⚡ *urgency add-on selected:* {urgency}\n\n"
+            f"please complete the urgency payment below.\n"
+            f"⭐ {urgency_stars:,} stars (~${urgency_usd:,.2f} usd)\n\n"
+            "tap the button to pay.",
+            parse_mode="Markdown"
+        )
+        await context.bot.send_invoice(
+            chat_id=update.message.chat_id,
+            title=f"urgency add-on — {urgency}",
+            description="priority processing for your order. all sales are final.",
+            payload=f"urgency_{update.effective_user.id}",
+            currency="XTR",
+            prices=[LabeledPrice(label="urgency stars", amount=urgency_stars)],
+        )
+    else:
+        context.user_data.clear()
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
